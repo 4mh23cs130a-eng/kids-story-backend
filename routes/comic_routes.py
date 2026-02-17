@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 from typing import List
 from db import get_db
 from schemas.comic_schema import ComicCreate, ComicOut
-import models
+from repositories import comic_repository
 
 router = APIRouter(
     prefix="/comics",
@@ -12,12 +12,8 @@ router = APIRouter(
 
 @router.post("/", response_model=ComicOut)
 def create_comic(comic: ComicCreate, db: Session = Depends(get_db)):
-    new_comic = models.Comic(**comic.dict())
-    db.add(new_comic)
-    db.commit()
-    db.refresh(new_comic)
-    return new_comic
+    return comic_repository.create_comic(db=db, comic=comic)
 
 @router.get("/", response_model=List[ComicOut])
 def list_comics(db: Session = Depends(get_db)):
-    return db.query(models.Comic).all()
+    return comic_repository.get_comics(db)

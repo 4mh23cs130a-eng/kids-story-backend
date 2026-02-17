@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 from typing import List
 from db import get_db
 from schemas.video_schema import VideoCreate, VideoOut
-import models
+from repositories import video_repository
 
 router = APIRouter(
     prefix="/videos",
@@ -12,12 +12,8 @@ router = APIRouter(
 
 @router.post("/", response_model=VideoOut)
 def create_video(video: VideoCreate, db: Session = Depends(get_db)):
-    new_video = models.Video(**video.dict())
-    db.add(new_video)
-    db.commit()
-    db.refresh(new_video)
-    return new_video
+    return video_repository.create_video(db=db, video=video)
 
 @router.get("/", response_model=List[VideoOut])
 def list_videos(db: Session = Depends(get_db)):
-    return db.query(models.Video).all()
+    return video_repository.get_videos(db)
