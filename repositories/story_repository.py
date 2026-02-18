@@ -2,8 +2,8 @@ from sqlalchemy.orm import Session
 import models
 from schemas.story_schema import StoryCreate
 
-def create_story(db: Session, story: StoryCreate, user_id: int):
-    db_story = models.Story(**story.dict(), user_id=user_id)
+def create_story(db: Session, title: str, content: str, user_id: int):
+    db_story = models.Story(title=title, content=content, user_id=user_id)
     db.add(db_story)
     db.commit()
     db.refresh(db_story)

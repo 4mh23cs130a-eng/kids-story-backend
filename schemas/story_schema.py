@@ -9,6 +9,10 @@ class StoryBase(BaseModel):
 class StoryCreate(StoryBase):
     pass
 
+class StoryGenerate(BaseModel):
+    title: str
+    prompt: str
+
 class StoryOut(StoryBase):
     id: int
     user_id: int
@@ -16,3 +20,4 @@ class StoryOut(StoryBase):
 
     class Config:
         from_attributes = True
+
