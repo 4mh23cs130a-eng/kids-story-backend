@@ -1,7 +1,13 @@
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 import models
 from db import engine
 from routes import auth_routes, story_routes, comic_routes, video_routes
+from pathlib import Path
+
+# Ensure output directories exist
+Path("generated_comics").mkdir(exist_ok=True)
+Path("generated_videos").mkdir(exist_ok=True)
 
 # Create database tables
 models.Base.metadata.create_all(bind=engine)
@@ -17,6 +23,10 @@ app.include_router(auth_routes.router)
 app.include_router(story_routes.router)
 app.include_router(comic_routes.router)
 app.include_router(video_routes.router)
+
+# Serve generated files as static URLs
+app.mount("/static/comics", StaticFiles(directory="generated_comics"), name="comics")
+app.mount("/static/videos", StaticFiles(directory="generated_videos"), name="videos")
 
 @app.get("/")
 def read_root():
