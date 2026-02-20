@@ -9,6 +9,11 @@ class UserBase(BaseModel):
 class UserCreate(UserBase):
     password: str
 
+# ── Used for login (no username required) ──────────────────────────────────────
+class UserLogin(BaseModel):
+    email: EmailStr
+    password: str
+
 class UserOut(UserBase):
     id: int
     created_at: datetime

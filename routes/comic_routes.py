@@ -1,11 +1,11 @@
+import json
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import List
 from db import get_db
 from schemas.comic_schema import ComicCreate, ComicOut
 from repositories import comic_repository, story_repository
-from utils.image_gen import generate_full_comic_page
-import json
+from utils.image_gen import generate_comic_panels
 
 router = APIRouter(
     prefix="/comics",
@@ -16,17 +16,20 @@ router = APIRouter(
 @router.post("/generate/{story_id}", response_model=ComicOut)
 def generate_comic(story_id: int, db: Session = Depends(get_db)):
     """
-    Generate a full comic page (4-panel 2x2 grid) from a story.
-    Uses AI images per scene, composed into one single PNG.
+    Generate 4 individual comic images from a story — one image per scene.
+    Each image contains:
+      - AI-generated illustration for that scene (640x512 px)
+      - Full scene text as a caption below the illustration
+    The 4 file paths are stored as a JSON array in image_paths.
     """
     # 1. Fetch the story
     story = story_repository.get_story(db=db, story_id=story_id)
     if not story:
         raise HTTPException(status_code=404, detail=f"Story with id {story_id} not found.")
 
-    # 2. Generate full comic page (4 panels)
+    # 2. Generate 4 separate comic images
     try:
-        page_path = generate_full_comic_page(
+        paths: list = generate_comic_panels(
             story_id=story_id,
             story_content=story.content,
             story_title=story.title or "",
@@ -34,15 +37,14 @@ def generate_comic(story_id: int, db: Session = Depends(get_db)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Comic generation failed: {str(e)}")
 
-    # 3. Save comic record
+    # 3. Save comic record  (paths stored as JSON string)
     comic_data = ComicCreate(
         title=f"Comic: {story.title}",
         story_id=story_id,
-        image_paths=page_path,
+        image_paths=json.dumps(paths),   # e.g. '["generated_comics/story_1_scene_1.png", ...]'
     )
     comic = comic_repository.create_comic(db=db, comic=comic_data)
     return comic
-
 
 
 @router.post("/", response_model=ComicOut)

@@ -70,40 +70,83 @@ def _detect_character(story_content: str) -> str:
     return "rabbit"
 
 
+def _detect_character_name(story_content: str, character_type: str) -> str:
+    """
+    Try to extract the main character's name from the story.
+    e.g. 'Leo the lion', 'Bella the rabbit', 'Max the dog'.
+    Falls back to a generic description if no name is found.
+    """
+    # Look for patterns like 'Name the animal' or 'Name, a/an animal'
+    patterns = [
+        rf"([A-Z][a-z]+)(?:,? (?:the|a|an) {character_type})",
+        rf"([A-Z][a-z]+)(?:'s| was| had| lived| went| said| wanted)",
+    ]
+    for pat in patterns:
+        m = re.search(pat, story_content)
+        if m:
+            name = m.group(1)
+            # Filter common non-name words
+            if name.lower() not in {"once","one","in","the","a","an","there","he","she","it"}:
+                return f"{name} the {character_type}"
+    return f"the {character_type}"
+
+
 # ── Scene splitting ────────────────────────────────────────────────────────────
-_STAGE_LABELS = ["Beginning", "Conflict", "Action", "Resolution"]
+_STAGE_LABELS = ["Scene 1", "Scene 2", "Scene 3", "Scene 4"]
 
 def _split_scenes(story: str, n: int = 4) -> list:
+    """Split story into exactly n non-overlapping sequential scenes."""
+    # Split on sentence boundaries
     sents = re.split(r"(?<=[.!?])\s+", story.strip())
     sents = [s.strip() for s in sents if s.strip()]
+    # Pad if too few sentences
     while len(sents) < n:
         sents.append(sents[-1])
-    chunk = max(1, len(sents) // n)
+    # Distribute sentences as evenly as possible across n panels
+    base, extra = divmod(len(sents), n)
     scenes = []
+    start = 0
     for i in range(n):
-        s = i * chunk
-        e = s + chunk if i < n - 1 else len(sents)
-        scenes.append(" ".join(sents[s:e])[:280])
+        end = start + base + (1 if i < extra else 0)
+        scenes.append(" ".join(sents[start:end])[:1000])  # no hard cut—keep full scene
+        start = end
     return scenes
 
 
 # ── AI prompt builder ──────────────────────────────────────────────────────────
 _STAGE_MOOD = [
-    "happy peaceful morning",
-    "stormy dangerous dramatic",
-    "brave heroic adventure",
-    "joyful celebration colorful",
+    "peaceful happy morning, introduction of the hero",
+    "tense dramatic moment, rising action and challenge",
+    "brave heroic adventure, climax and problem-solving",
+    "joyful celebration, happy ending and resolution",
 ]
 
-def _build_prompt(scene_text: str, character_type: str, stage_idx: int) -> str:
-    clean = re.sub(r"\*+", "", scene_text).strip()
-    mood  = _STAGE_MOOD[stage_idx % len(_STAGE_MOOD)]
+def _build_prompt(scene_text: str, character_type: str, stage_idx: int,
+                  character_name: str = "", prev_scene: str = "") -> str:
+    """
+    Build an image prompt that:
+    - Always revolves around the named main character
+    - Reflects the mood/stage of the story
+    - Includes a brief summary of the previous scene for visual continuity
+    """
+    clean      = re.sub(r"\*+", "", scene_text).strip()[:200]
+    mood       = _STAGE_MOOD[stage_idx % len(_STAGE_MOOD)]
+    char_desc  = character_name if character_name else f"cute {character_type}"
+
+    # Continuity context from the previous panel
+    if prev_scene:
+        prev_clean = re.sub(r"\*+", "", prev_scene).strip()[:100]
+        continuation = f"continuing the story from previous scene: '{prev_clean}', now: "
+    else:
+        continuation = "story begins: "
+
     return (
-        f"children's storybook illustration, cute {character_type} character, "
-        f"{mood}, {clean}, "
-        f"Pixar Disney cartoon style, vibrant colors, colorful background, "
-        f"kids comic book art, clean outlines, digital painting, "
-        f"high quality, detailed, no text, no watermark"
+        f"children's storybook comic panel, {continuation}"
+        f"{clean}. "
+        f"Main character: {char_desc}, same adorable character in every panel, "
+        f"{mood}, Pixar Disney cartoon style, "
+        f"vibrant colors, expressive face, kids comic book art, "
+        f"clean bold outlines, digital painting, high quality, no text, no watermark"
     )
 
 
@@ -321,140 +364,121 @@ def _make_fallback_panel(scene_text: str, panel_idx: int,
     buf = io.BytesIO(); img.save(buf,format="PNG"); return buf.getvalue()
 
 
-# ── Overlay: add scene badge + caption on top of any image ────────────────────
+# ── Overlay: add scene badge + full caption on top of any image ───────────────
 def _add_overlay(image_bytes: bytes, scene_text: str,
-                 panel_idx: int, size=(512,512)) -> bytes:
+                 panel_idx: int, size=(640, 800)) -> bytes:
     """
-    Add a semi-transparent scene badge and caption bar on top of an image.
-    Works on both AI images and Pillow fallback panels.
+    Compose a tall image:
+      - Top portion (640x512): the AI/fallback illustration
+      - Bottom caption zone: full scene text, never truncated
+    The output is 640 wide x (512 + caption_height) tall.
     """
     from PIL import Image, ImageDraw, ImageFont
-    img = Image.open(io.BytesIO(image_bytes)).convert("RGB").resize(size, Image.LANCZOS)
-    draw = ImageDraw.Draw(img, "RGBA")
-    W, H = img.size
-    acc = _hex(ACCENTS[panel_idx % len(ACCENTS)])
-    labels = ["① Beginning","② Conflict","③ Action","④ Resolution"]
+
+    ILL_W, ILL_H = 640, 512          # illustration area
+    SIDE_PAD     = 16
+    LINE_H       = 20
+    TOP_PAD      = 12
+    BOT_PAD      = 14
+    TEXT_W       = ILL_W - SIDE_PAD * 2
+    WRAP_CHARS   = TEXT_W // 8       # ~76 chars at font size 14
+
+    acc    = _hex(ACCENTS[panel_idx % len(ACCENTS)])
+    labels = ["📖 Scene 1 of 4", "📖 Scene 2 of 4",
+               "📖 Scene 3 of 4", "📖 Scene 4 of 4"]
 
     try:
-        fB = ImageFont.truetype("arialbd.ttf", 16)
-        fC = ImageFont.truetype("arial.ttf",   14)
+        fB = ImageFont.truetype("arialbd.ttf", 18)
+        fC = ImageFont.truetype("arial.ttf",   15)
     except Exception:
         fB = fC = ImageFont.load_default()
 
-    # Scene badge (top-left)
-    bw, bh = 148, 28
-    draw.rounded_rectangle([8,8,8+bw,8+bh], radius=8, fill=(*acc,220))
-    draw.text((8+bw//2,8+bh//2), labels[panel_idx], fill="white", font=fB, anchor="mm")
+    # -- illustration --
+    ill = Image.open(io.BytesIO(image_bytes)).convert("RGB").resize(
+        (ILL_W, ILL_H), Image.LANCZOS)
 
-    # Caption bar (bottom)
-    cap_lines = textwrap.wrap(re.sub(r"\*+","",scene_text).strip(), width=46)[:3]
-    cap_h = len(cap_lines)*19 + 18
-    draw.rectangle([0,H-cap_h,W,H], fill=(10,10,10,215))
-    draw.rectangle([0,H-cap_h,W,H-cap_h+4], fill=(*acc,255))
-    for li,ln in enumerate(cap_lines):
-        draw.text((W//2, H-cap_h+10+li*19), ln, fill="white", font=fC, anchor="mm")
+    # Scene badge on illustration (top-left)
+    draw_ill = ImageDraw.Draw(ill, "RGBA")
+    bw, bh = 200, 30
+    draw_ill.rounded_rectangle([8, 8, 8+bw, 8+bh], radius=8, fill=(*acc, 220))
+    draw_ill.text((8+bw//2, 8+bh//2), labels[panel_idx],
+                  fill="white", font=fB, anchor="mm")
+    draw_ill.rectangle([0, 0, ILL_W-1, ILL_H-1], outline="#1A1A1A", width=4)
 
-    # Panel border
-    draw.rectangle([0,0,W-1,H-1], outline="#1A1A1A", width=4)
+    # -- caption zone (full text, never cut) --
+    clean_text = re.sub(r"\*+", "", scene_text).strip()
+    cap_lines  = textwrap.wrap(clean_text, width=WRAP_CHARS) or [""]
+    cap_h      = TOP_PAD + len(cap_lines) * LINE_H + BOT_PAD
 
-    buf = io.BytesIO(); img.save(buf,format="PNG"); return buf.getvalue()
+    # Build final canvas
+    canvas = Image.new("RGB", (ILL_W, ILL_H + cap_h), "#FFFBF0")
+    canvas.paste(ill, (0, 0))
+
+    # Caption background
+    draw_cap = ImageDraw.Draw(canvas, "RGBA")
+    draw_cap.rectangle([0, ILL_H, ILL_W, ILL_H + cap_h], fill=(20, 20, 20, 255))
+    draw_cap.rectangle([0, ILL_H, ILL_W, ILL_H + 5],     fill=(*acc, 255))
+
+    for li, ln in enumerate(cap_lines):
+        draw_cap.text(
+            (ILL_W // 2, ILL_H + TOP_PAD + li * LINE_H),
+            ln, fill="white", font=fC, anchor="mm"
+        )
+
+    # Outer border
+    draw_cap.rectangle([0, 0, ILL_W-1, ILL_H+cap_h-1], outline="#1A1A1A", width=4)
+
+    buf = io.BytesIO()
+    canvas.save(buf, format="PNG")
+    return buf.getvalue()
 
 
-# ── Comic page compositor ──────────────────────────────────────────────────────
-def _compose_page(panel_images: list, scene_texts: list,
-                  story_title: str) -> bytes:
-    """Compose 4 panel images (512×512 each) into one comic page."""
-    from PIL import Image, ImageDraw, ImageFont
-
-    PANEL_W, PANEL_H = 512, 512
-    GAP    = 12
-    BORDER = 6
-    HDR_H  = 78
-    PAGE_W = PANEL_W*2 + GAP*3
-    PAGE_H = HDR_H + PANEL_H*2 + GAP*3
-
-    page = Image.new("RGB", (PAGE_W, PAGE_H), "#FFFBF0")
-    draw = ImageDraw.Draw(page, "RGBA")
-
-    # Dot-grid texture
-    for dy in range(0, PAGE_H, 16):
-        for dx in range(0, PAGE_W, 16):
-            draw.ellipse([dx-2,dy-2,dx+2,dy+2], fill=(0,0,0,16))
-
-    try:
-        fT = ImageFont.truetype("arialbd.ttf", 28)
-    except Exception:
-        fT = ImageFont.load_default()
-
-    # Header
-    _grad(draw, 0, 0, PAGE_W, HDR_H, "#212121", "#424242")
-    draw.rectangle([3,3,PAGE_W-3,HDR_H-3], outline="#F9A825", width=3)
-    _grad(draw, 5, 5, PAGE_W-10, HDR_H-10, "#F9A825", "#FFC400")
-    clean = re.sub(r"\*+","",story_title).strip() or "Kids Story"
-    draw.text((PAGE_W//2+2,HDR_H//2+2), f"✦ {clean.upper()} ✦",
-              fill=(0,0,0,100), font=fT, anchor="mm")
-    draw.text((PAGE_W//2,HDR_H//2), f"✦ {clean.upper()} ✦",
-              fill="#1A237E", font=fT, anchor="mm")
-
-    positions = [
-        (GAP,             HDR_H+GAP),
-        (GAP*2+PANEL_W,   HDR_H+GAP),
-        (GAP,             HDR_H+GAP*2+PANEL_H),
-        (GAP*2+PANEL_W,   HDR_H+GAP*2+PANEL_H),
-    ]
-
-    for i, (px, py) in enumerate(positions):
-        acc = _hex(ACCENTS[i])
-        # Coloured outer frame
-        draw.rectangle([px-4,py-4,px+PANEL_W+4,py+PANEL_H+4],
-                       fill=ACCENTS[i], outline="#1A1A1A", width=2)
-        # Paste panel image
-        if i < len(panel_images) and panel_images[i]:
-            try:
-                pimg = Image.open(io.BytesIO(panel_images[i])).convert("RGB")
-                pimg = pimg.resize((PANEL_W, PANEL_H), Image.LANCZOS)
-                page.paste(pimg, (px, py))
-            except Exception as e:
-                print(f"[image_gen] Paste error panel {i}: {e}")
-                page.paste(Image.new("RGB",(PANEL_W,PANEL_H),"#EEE"), (px,py))
-        # Panel border
-        draw.rectangle([px,py,px+PANEL_W-1,py+PANEL_H-1], outline="#1A1A1A", width=BORDER)
-
-    # Page border
-    draw.rectangle([0,0,PAGE_W-1,PAGE_H-1], outline="#1A1A1A", width=6)
-
-    buf = io.BytesIO(); page.save(buf, format="PNG"); return buf.getvalue()
+# _compose_page removed — each scene is now saved as its own image file.
 
 
 # ── Public API ─────────────────────────────────────────────────────────────────
-def generate_full_comic_page(story_id: int, story_content: str,
-                              story_title: str = "") -> str:
+def generate_comic_panels(story_id: int, story_content: str,
+                           story_title: str = "") -> list:
     """
-    Generate a full 4-panel comic page using REAL AI images from Pollinations.ai.
-    All 4 images are fetched in parallel (~15-25s).
-    Falls back to Pillow illustration if AI is unavailable.
+    Generate 4 individual comic images — one per scene.
+    Each image = AI illustration (640x512) + full scene text caption below it.
+    Returns a list of 4 file paths:
+        ['generated_comics/story_1_scene_1.png', ..._scene_4.png]
     """
     t0 = time.time()
     character_type = _detect_character(story_content)
     print(f"[image_gen] Character detected: {character_type}")
 
-    scenes  = _split_scenes(story_content, 4)
-    prompts = [_build_prompt(s, character_type, i) for i, s in enumerate(scenes)]
+    scenes = _split_scenes(story_content, 4)
+    character_name = _detect_character_name(story_content, character_type)
+    print(f"[image_gen] Main character: {character_name}")
+    print(f"[image_gen] Scenes:\n" +
+          "\n".join(f"  Scene {i+1}: {s[:80]}..." for i, s in enumerate(scenes)))
 
-    # ── Parallel AI fetch (HF → Pollinations → Pillow) ──────────────────────────
-    ai_images = [None] * 4
+    # Build prompts — named character + previous scene context
+    prompts = [
+        _build_prompt(
+            scene_text=scenes[i],
+            character_type=character_type,
+            stage_idx=i,
+            character_name=character_name,
+            prev_scene=scenes[i - 1] if i > 0 else "",
+        )
+        for i in range(len(scenes))
+    ]
+
+    # ── Parallel AI image fetch ───────────────────────────────────────────────
+    ai_images: list = [None] * 4
     source = "HuggingFace" if HF_TOKEN else "Pollinations"
-    print(f"[image_gen] Fetching {len(prompts)} AI images in parallel (primary: {source})...")
+    print(f"[image_gen] Fetching 4 AI images in parallel (primary: {source})...")
     with ThreadPoolExecutor(max_workers=4) as pool:
         future_map = {pool.submit(_fetch_ai_image, p, i): i
                       for i, p in enumerate(prompts)}
-
         for fut in as_completed(future_map):
-            idx = future_map[fut]
-            ai_images[idx] = fut.result()
+            ai_images[future_map[fut]] = fut.result()
 
-    # ── Build panel images (AI + overlay, or Pillow fallback) ────────────────
-    panel_images = []
+    # ── Build and save each panel as a separate file ──────────────────────────
+    saved_paths = []
     for i, (ai_bytes, scene) in enumerate(zip(ai_images, scenes)):
         if ai_bytes:
             panel_bytes = _add_overlay(ai_bytes, scene, i)
@@ -462,21 +486,27 @@ def generate_full_comic_page(story_id: int, story_content: str,
             print(f"[image_gen] Panel {i+1}: using Pillow fallback")
             fallback = _make_fallback_panel(scene, i, character_type)
             panel_bytes = _add_overlay(fallback, scene, i)
-        panel_images.append(panel_bytes)
 
-    # ── Compose page ────────────────────────────────────────────────────────
-    page_bytes = _compose_page(panel_images, scenes, story_title)
-    out = f"{OUTPUT_DIR}/story_{story_id}.png"
-    with open(out, "wb") as f:
-        f.write(page_bytes)
+        path = f"{OUTPUT_DIR}/story_{story_id}_scene_{i+1}.png"
+        with open(path, "wb") as f:
+            f.write(panel_bytes)
+        saved_paths.append(path)
+        print(f"[image_gen] Saved scene {i+1} → {path}")
 
     elapsed = time.time() - t0
     ai_count = sum(1 for x in ai_images if x)
-    print(f"[image_gen] Done in {elapsed:.1f}s — {ai_count}/4 AI images, "
-          f"{4-ai_count}/4 fallback. Saved: {out}")
-    return out
+    print(f"[image_gen] Done in {elapsed:.1f}s — {ai_count}/4 AI, "
+          f"{4-ai_count}/4 fallback.")
+    return saved_paths
+
+
+# Keep old names as aliases for backwards compatibility
+def generate_full_comic_page(story_id: int, story_content: str,
+                              story_title: str = "") -> list:
+    """Alias for generate_comic_panels (now returns list of 4 paths)."""
+    return generate_comic_panels(story_id, story_content, story_title)
 
 
 def generate_comic_images(story_id: int, story_content: str) -> list:
     """Legacy wrapper."""
-    return [generate_full_comic_page(story_id, story_content)]
+    return generate_comic_panels(story_id, story_content)
